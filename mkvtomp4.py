@@ -25,11 +25,14 @@ class MkvtoMp4:
                  video_width=None,
                  h264_level=None,
                  qsv_decoder=True,
+                 dxva2_decoder=False,
                  audio_codec=['ac3'],
                  audio_bitrate=256,
                  audio_filter=None,
+                 audio_copyoriginal=False,
                  iOS=False,
                  iOSFirst=False,
+                 iOSLast=False,
                  iOS_filter=None,
                  maxchannels=None,
                  aac_adtstoasc=False,
@@ -44,6 +47,7 @@ class MkvtoMp4:
                  copyto=None,
                  moveto=None,
                  embedsubs=True,
+                 embedonlyinternalsubs=True,
                  providers=['addic7ed', 'podnapisi', 'thesubdb', 'opensubtitles'],
                  permissions=int("777", 8),
                  pix_fmt=None,
@@ -80,6 +84,7 @@ class MkvtoMp4:
         self.video_width = video_width
         self.h264_level = h264_level
         self.qsv_decoder = qsv_decoder
+        self.dxva2_decoder = settings.dxva2_decoder
         self.pix_fmt = pix_fmt
         # Audio settings
         self.audio_codec = audio_codec
@@ -87,11 +92,13 @@ class MkvtoMp4:
         self.audio_filter = audio_filter
         self.iOS = iOS
         self.iOSFirst = iOSFirst
+        self.iOSLast = iOSLast
         self.iOS_filter = iOS_filter
         self.maxchannels = maxchannels
         self.awl = awl
         self.adl = adl
         self.aac_adtstoasc = aac_adtstoasc
+        self.audio_copyoriginal = audio_copyoriginal
         # Subtitle settings
         self.scodec = scodec
         self.swl = swl
@@ -99,6 +106,7 @@ class MkvtoMp4:
         self.downloadsubs = downloadsubs
         self.subproviders = providers
         self.embedsubs = embedsubs
+        self.embedonlyinternalsubs = embedonlyinternalsubs
         self.subencoding = subencoding
 
         # Import settings
@@ -130,6 +138,7 @@ class MkvtoMp4:
         self.video_width = settings.vwidth
         self.h264_level = settings.h264_level
         self.qsv_decoder = settings.qsv_decoder
+        self.dxva2_decoder = settings.dxva2_decoder
         self.pix_fmt = settings.pix_fmt
         # Audio settings
         self.audio_codec = settings.acodec
@@ -137,11 +146,13 @@ class MkvtoMp4:
         self.audio_filter = settings.afilter
         self.iOS = settings.iOS
         self.iOSFirst = settings.iOSFirst
+        self.iOSLast = settings.iOSLast
         self.iOS_filter = settings.iOSfilter
         self.maxchannels = settings.maxchannels
         self.awl = settings.awl
         self.adl = settings.adl
         self.aac_adtstoasc = settings.aac_adtstoasc
+        self.audio_copyoriginal = settings.audio_copyoriginal
         # Subtitle settings
         self.scodec = settings.scodec
         self.swl = settings.swl
@@ -149,6 +160,7 @@ class MkvtoMp4:
         self.downloadsubs = settings.downloadsubs
         self.subproviders = settings.subproviders
         self.embedsubs = settings.embedsubs
+        self.embedonlyinternalsubs = settings.embedonlyinternalsubs
         self.subencoding = settings.subencoding
 
         self.log.debug("Settings imported.")
@@ -349,6 +361,7 @@ class MkvtoMp4:
                 a.metadata['language'] = self.adl
 
             # Proceed if no whitelist is set, or if the language is in the whitelist
+            iosdata = None
             if self.awl is None or a.metadata['language'].lower() in self.awl:
                 # Create iOS friendly audio stream if the default audio stream has too many channels (iOS only likes AAC stereo)
                 if self.iOS and a.audio_channels > 2:
@@ -365,7 +378,7 @@ class MkvtoMp4:
                     else:
                         disposition = 'none'
                         self.log.info("Audio track is number %s setting disposition to %s" % (str(l), disposition))
-                    audio_settings.update({l: {
+                    iosdata = {
                         'map': a.index,
                         'codec': self.iOS[0],
                         'channels': 2,
@@ -373,8 +386,10 @@ class MkvtoMp4:
                         'filter': self.iOS_filter,
                         'language': a.metadata['language'],
                         'disposition': disposition,
-                    }})
-                    l += 1
+                        }
+                    if not self.iOSLast:
+                        audio_settings.update({l: iosdata})
+                        l += 1
                 # If the iOS audio option is enabled and the source audio channel is only stereo, the additional iOS channel will be skipped and a single AAC 2.0 channel will be made regardless of codec preference to avoid multiple stereo channels
                 self.log.info("Creating audio stream %s from source stream %s." % (str(l), a.index))
                 if self.iOS and a.audio_channels <= 2:
@@ -436,7 +451,22 @@ class MkvtoMp4:
 
                 if acodec == 'copy' and a.codec == 'aac' and self.aac_adtstoasc:
                     audio_settings[l]['bsf'] = 'aac_adtstoasc'
-                l = l + 1
+                l += 1
+
+                #Add the iOS track last instead
+                if self.iOSLast and iosdata:
+                    iosdata['disposition'] = 'none'
+                    audio_settings.update({l: iosdata})
+                    l += 1
+
+                if self.audio_copyoriginal and acodec != 'copy':
+                    self.log.info("Adding copy of original audio track in format %s" % a.codec)
+                    audio_settings.update({l: {
+                        'map': a.index,
+                        'codec': 'copy',
+                        'language': a.metadata['language'],
+                        'disposition': 'none',
+                    }})
 
         # Subtitle streams
         subtitle_settings = {}
@@ -548,7 +578,7 @@ class MkvtoMp4:
                 self.log.info("Unable to download subtitles.", exc_info=True)
                 self.log.debug("Unable to download subtitles.", exc_info=True)
         # External subtitle import
-        if self.embedsubs:  # Don't bother if we're not embeddeding any subtitles
+        if self.embedsubs and not self.embedonlyinternalsubs:  # Don't bother if we're not embeddeding subtitles and external subtitles
             src = 1  # FFMPEG input source number
             for dirName, subdirList, fileList in os.walk(input_dir):
                 for fname in fileList:
@@ -623,6 +653,9 @@ class MkvtoMp4:
         # If using h264qsv, add the codec in front of the input for decoding
         if vcodec == "h264qsv" and info.video.codec.lower() == "h264" and self.qsv_decoder and (info.video.video_level / 10) < 5:
             options['preopts'].extend(['-vcodec', 'h264_qsv'])
+
+        if self.dxva2_decoder: # DXVA2 will fallback to CPU decoding when it hits a file that it cannot handle, so we don't need to check if the file is supported.
+            options['preopts'].extend(['-hwaccel', 'dxva2' ])
 
         # Add width option
         if vwidth:
